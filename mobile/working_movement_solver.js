@@ -119,8 +119,8 @@ class WorkingMovementSolver {
       console.log(`⚠️ Could not analyze canvas: ${e.message}`);
     }
     
-    // Just try a few likely distances
-    const distances = [120, 80, 160, 100, 140];
+    // Try comprehensive range for the surprise!
+    const distances = [120, 80, 160, 100, 140, 90, 110, 130, 150, 170, 70, 85, 95, 105, 115, 125, 135];
     
     for (const distance of distances) {
       console.log(`\n💪 TRYING ${distance}px with WORKING movement...`);

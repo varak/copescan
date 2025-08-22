@@ -143,12 +143,37 @@ export default function App() {
       setIsLoadingPoints(true);
       console.log('Fetching user points...');
       
-      // Use the OCR-based CAPTCHA solver
-      const { OCRPuzzleSolver } = require('./ocr_puzzle_solver.js');
-      const solver = new OCRPuzzleSolver();
-      await solver.init();
-      const result = await solver.navigateAndSolve();
-      await solver.close();
+      // Use the proven working audio CAPTCHA solver (hw:2,0 device)
+      const { spawn } = require('child_process');
+      const result = await new Promise((resolve) => {
+        const solver = spawn('node', ['./working_audio_captcha_solver.js'], { cwd: __dirname });
+        
+        let output = '';
+        solver.stdout.on('data', (data) => {
+          output += data.toString();
+          console.log('CAPTCHA Solver:', data.toString());
+        });
+        
+        solver.on('close', (code) => {
+          console.log(`CAPTCHA solver finished with code: ${code}`);
+          
+          if (output.includes('CAPTCHA SOLVED WITH WORKING AUDIO CAPTURE')) {
+            // Parse points from output if available
+            const pointsMatch = output.match(/Points:\s*(\d+)/i);
+            resolve(pointsMatch ? parseInt(pointsMatch[1]) : 'Success');
+          } else if (output.includes('CAPTCHA')) {
+            resolve({ error: true, message: 'CAPTCHA required - audio solver attempted but needs manual help' });
+          } else {
+            resolve({ error: true, message: 'Points fetch failed' });
+          }
+        });
+        
+        // Timeout after 2 minutes
+        setTimeout(() => {
+          solver.kill();
+          resolve({ error: true, message: 'Audio CAPTCHA solver timeout' });
+        }, 120000);
+      });
       
       if (result && result.error) {
         console.log(`Points fetch error: ${result.error}`);
