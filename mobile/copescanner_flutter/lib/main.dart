@@ -33,6 +33,8 @@ class _CopeScannerHomeState extends State<CopeScannerHome> {
   final TextEditingController _manualController = TextEditingController();
   bool _isProcessing = false;
   final textRecognizer = TextRecognizer();
+  int? _userPoints;
+  bool _isLoadingPoints = false;
 
   final String username = 'mike@emke.com';
   final String password = 'cope123123A!';
@@ -41,6 +43,7 @@ class _CopeScannerHomeState extends State<CopeScannerHome> {
   void initState() {
     super.initState();
     _initializeCamera();
+    _fetchUserPoints();
   }
 
   Future<void> _initializeCamera() async {
@@ -51,6 +54,135 @@ class _CopeScannerHomeState extends State<CopeScannerHome> {
       await _cameraController!.initialize();
       setState(() {});
     }
+  }
+
+  Future<void> _fetchUserPoints() async {
+    setState(() => _isLoadingPoints = true);
+    
+    try {
+      final response = await http.post(
+        Uri.parse('https://www.freshcope.com/rewards/redeem'),
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'User-Agent': 'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.5',
+          'Referer': 'https://www.freshcope.com/',
+        },
+        body: 'username=${Uri.encodeComponent(username)}&password=${Uri.encodeComponent(password)}',
+      );
+
+      if (response.statusCode == 200) {
+        final responseText = response.body.toLowerCase();
+        
+        // Look for points balance patterns
+        final patterns = [
+          RegExp(r'(?:current\s*balance|available\s*points|your\s*points)[:\s]*(\d+)', caseSensitive: false),
+          RegExp(r'(\d+)\s*(?:points?\s*available|points?\s*balance)', caseSensitive: false),
+          RegExp(r'balance[:\s]*(\d+)', caseSensitive: false),
+          RegExp(r'(\d+)\s*points?', caseSensitive: false),
+        ];
+        
+        for (final pattern in patterns) {
+          final match = pattern.firstMatch(responseText);
+          if (match != null && match.group(1) != null) {
+            final points = int.tryParse(match.group(1)!);
+            if (points != null) {
+              setState(() => _userPoints = points);
+              return;
+            }
+          }
+        }
+      }
+    } catch (e) {
+      print('Error fetching points: $e');
+    } finally {
+      setState(() => _isLoadingPoints = false);
+    }
+  }
+
+  Map<String, dynamic> _detectSubmissionResult(String responseText, String submittedCode) {
+    final text = responseText.toLowerCase();
+    final length = responseText.length;
+    
+    // Short response or success page indicators
+    if (length < 5000 || text.contains('thank') || text.contains('success') || text.contains('earned')) {
+      return {'success': true, 'message': 'Code submitted successfully!'};
+    }
+    
+    // If response is homepage (>15000 chars), analyze the submitted code
+    if (length > 15000 && (text.contains('copenhagen') && text.contains('home page'))) {
+      return _analyzeCodeFailure(submittedCode);
+    }
+    
+    return {'success': false, 'message': 'Code submission failed. Please try again.'};
+  }
+
+  Map<String, dynamic> _analyzeCodeFailure(String code) {
+    final codePattern = RegExp(r'^[A-Z0-9]{5}-[A-Z0-9]{4}-[A-Z0-9]{4}$');
+    
+    // Check if code matches expected format
+    if (!codePattern.hasMatch(code)) {
+      if (code.length != 14) {
+        return {
+          'success': false,
+          'message': 'Code format error: Expected 14 characters (XXXXX-XXXX-XXXX), got ${code.length}. OCR may have misread the code.'
+        };
+      }
+      
+      if (!code.contains('-') || code.split('-').length != 3) {
+        return {
+          'success': false,
+          'message': 'Code format error: Missing dashes (-). OCR may have misread the separators. Try manual input.'
+        };
+      }
+      
+      final parts = code.split('-');
+      if (parts[0].length != 5 || parts[1].length != 4 || parts[2].length != 4) {
+        return {
+          'success': false,
+          'message': 'Code format error: Expected XXXXX-XXXX-XXXX format. Got ${parts[0].length}-${parts[1].length}-${parts[2].length}. OCR may have misread the code.'
+        };
+      }
+      
+      final invalidChars = RegExp(r'[^A-Z0-9\-]').allMatches(code);
+      if (invalidChars.isNotEmpty) {
+        final chars = invalidChars.map((m) => m.group(0)).join(', ');
+        return {
+          'success': false,
+          'message': 'Code contains invalid characters: $chars. OCR may have misread these. Try manual input.'
+        };
+      }
+    }
+    
+    // If format is correct, check for OCR issues
+    if (codePattern.hasMatch(code)) {
+      if (code.contains('AAAA') || code.contains('1111') || code.contains('0000')) {
+        return {
+          'success': false,
+          'message': 'Code appears to contain repeated characters. OCR may have misread the code. Please check and re-scan or use manual input.'
+        };
+      }
+      
+      final confusingChars = RegExp(r'[OIL]').allMatches(code);
+      if (confusingChars.isNotEmpty) {
+        final chars = confusingChars.map((m) => m.group(0)).join("', '");
+        return {
+          'success': false,
+          'message': 'Code may contain OCR errors. Found \'$chars\' which could be \'0\', \'1\', or other characters. Try manual input or re-scan.'
+        };
+      }
+      
+      return {
+        'success': false,
+        'message': 'Code already used or invalid. If you believe the code is correct, it may have been previously submitted.'
+      };
+    }
+    
+    return {
+      'success': false,
+      'message': 'Code submission failed. Please check the code format and try again.'
+    };
   }
 
   Future<void> _takePicture() async {
@@ -100,13 +232,23 @@ class _CopeScannerHomeState extends State<CopeScannerHome> {
       );
 
       if (response.statusCode == 200) {
-        _showDialog('Success!', 'Code $code submitted');
-        setState(() {
-          _extractedCode = '';
-          _manualController.clear();
-        });
+        final result = _detectSubmissionResult(response.body, code);
+        
+        if (result['success']) {
+          _showDialog('Success!', result['message']);
+          
+          // Refresh points after successful submission
+          await _fetchUserPoints();
+          
+          setState(() {
+            _extractedCode = '';
+            _manualController.clear();
+          });
+        } else {
+          _showDialog('Submission Failed', result['message']);
+        }
       } else {
-        _showDialog('Error', 'Failed to submit code');
+        _showDialog('Network Error', 'Failed to submit code. Status: ${response.statusCode}');
       }
     } catch (e) {
       _showDialog('Error', 'Network error');
@@ -142,6 +284,56 @@ class _CopeScannerHomeState extends State<CopeScannerHome> {
       ),
       body: Column(
         children: [
+          // Points Display
+          Container(
+            width: double.infinity,
+            padding: EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+            child: InkWell(
+              onTap: _isLoadingPoints ? null : _fetchUserPoints,
+              child: Container(
+                padding: EdgeInsets.all(15),
+                decoration: BoxDecoration(
+                  color: Colors.grey[100],
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border(
+                    left: BorderSide(color: Colors.green[700]!, width: 4),
+                  ),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black12,
+                      blurRadius: 4,
+                      offset: Offset(0, 2),
+                    ),
+                  ],
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      'Current Points:',
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.black87,
+                      ),
+                    ),
+                    Text(
+                      _isLoadingPoints 
+                        ? 'Loading...' 
+                        : _userPoints != null 
+                          ? '$_userPoints' 
+                          : 'Tap to refresh',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.green[700],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
           Expanded(
             flex: 3,
             child: _cameraController?.value.isInitialized == true

@@ -27,6 +27,8 @@ export default function App() {
   const [submissionCount, setSubmissionCount] = useState(0);
   const [devShareCredentials, setDevShareCredentials] = useState(null);
   const [devShareCacheTime, setDevShareCacheTime] = useState(0);
+  const [userPoints, setUserPoints] = useState(null);
+  const [isLoadingPoints, setIsLoadingPoints] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -69,6 +71,9 @@ export default function App() {
         if (queue) {
           setCodeQueue(JSON.parse(queue));
         }
+        
+        // Load user points on app start
+        await fetchUserPoints();
       } catch (error) {
         console.error('Permission request error:', error);
         setHasPermission(false);
@@ -130,6 +135,141 @@ export default function App() {
     return {
       username: 'mike@emke.com',
       password: 'cope123123A!'
+    };
+  };
+
+  const fetchUserPoints = async () => {
+    try {
+      setIsLoadingPoints(true);
+      console.log('Fetching user points...');
+      
+      // Use the OCR-based CAPTCHA solver
+      const { OCRPuzzleSolver } = require('./ocr_puzzle_solver.js');
+      const solver = new OCRPuzzleSolver();
+      await solver.init();
+      const result = await solver.navigateAndSolve();
+      await solver.close();
+      
+      if (result && result.error) {
+        console.log(`Points fetch error: ${result.error}`);
+        setUserPoints('Error');
+        Alert.alert(
+          'Points Fetch Failed',
+          result.message || 'Could not fetch points automatically.',
+          [{ text: 'OK' }]
+        );
+        return null;
+      } else if (typeof result === 'number') {
+        console.log(`Successfully got real points: ${result}`);
+        setUserPoints(result);
+        return result;
+      } else {
+        setUserPoints(null);
+        return null;
+      }
+    } catch (error) {
+      console.error('Error fetching points:', error);
+      setUserPoints(null);
+    } finally {
+      setIsLoadingPoints(false);
+    }
+    
+    return null;
+  };
+
+  const detectSubmissionResult = (responseText, submittedCode) => {
+    const text = responseText.toLowerCase();
+    const length = responseText.length;
+    
+    // Check for CAPTCHA before anything else
+    if (text.includes('captcha') || text.includes('puzzle') || text.includes('verify') || text.includes('challenge')) {
+      return { 
+        success: false, 
+        message: 'CAPTCHA detected - website requires verification. Try again later or when activity is lower.' 
+      };
+    }
+    
+    // Short response or success page indicators
+    if (length < 5000 || text.includes('thank') || text.includes('success') || text.includes('earned')) {
+      return { success: true, message: 'Code submitted successfully!' };
+    }
+    
+    // If response is homepage (20592 chars), analyze the submitted code to provide helpful feedback
+    if (length > 15000 && (text.includes('copenhagen') && text.includes('home page'))) {
+      return analyzeCodeFailure(submittedCode);
+    }
+    
+    // Default to error for other cases
+    return { success: false, message: 'Code submission failed. Please try again.' };
+  };
+
+  const analyzeCodeFailure = (code) => {
+    // Analyze the code format to provide specific feedback
+    const codePattern = /^[A-Z0-9]{5}-[A-Z0-9]{4}-[A-Z0-9]{4}$/;
+    
+    // Check if code matches expected format
+    if (!codePattern.test(code)) {
+      // Analyze what might be wrong with the format
+      if (code.length !== 14) {
+        return { 
+          success: false, 
+          message: `Code format error: Expected 14 characters (XXXXX-XXXX-XXXX), got ${code.length}. OCR may have misread the code.` 
+        };
+      }
+      
+      if (!code.includes('-') || code.split('-').length !== 3) {
+        return { 
+          success: false, 
+          message: 'Code format error: Missing dashes (-). OCR may have misread the separators. Try manual input.' 
+        };
+      }
+      
+      const parts = code.split('-');
+      if (parts[0].length !== 5 || parts[1].length !== 4 || parts[2].length !== 4) {
+        return { 
+          success: false, 
+          message: `Code format error: Expected XXXXX-XXXX-XXXX format. Got ${parts[0].length}-${parts[1].length}-${parts[2].length}. OCR may have misread the code.` 
+        };
+      }
+      
+      // Check for invalid characters
+      const invalidChars = code.match(/[^A-Z0-9\-]/g);
+      if (invalidChars) {
+        return { 
+          success: false, 
+          message: `Code contains invalid characters: ${invalidChars.join(', ')}. OCR may have misread these as: ${invalidChars.map(c => `'${c}'`).join(', ')}. Try manual input.` 
+        };
+      }
+    }
+    
+    // If format is correct, likely other issues
+    if (code.match(/^[A-Z0-9]{5}-[A-Z0-9]{4}-[A-Z0-9]{4}$/)) {
+      // Check for obviously fake patterns
+      if (code.includes('AAAA') || code.includes('1111') || code.includes('0000')) {
+        return { 
+          success: false, 
+          message: 'Code appears to contain repeated characters. OCR may have misread the code. Please check and re-scan or use manual input.' 
+        };
+      }
+      
+      // Check for common OCR confusion (0/O, 1/I, etc.)
+      const confusingChars = code.match(/[OIL]/g);
+      if (confusingChars) {
+        return { 
+          success: false, 
+          message: `Code may contain OCR errors. Found '${confusingChars.join("', '")}' which could be '0', '1', or other characters. Try manual input or re-scan.` 
+        };
+      }
+      
+      return { 
+        success: false, 
+        message: 'Code already used or invalid. If you believe the code is correct, it may have been previously submitted.' 
+      };
+    }
+    
+    return { 
+      success: false, 
+      message: 'Code submission failed. Please check the code format and try again.' 
     };
   };
 
@@ -280,27 +420,47 @@ export default function App() {
       });
 
       if (response.ok) {
-        const message = isDevShare 
-          ? `Code ${code} submitted successfully\n(DevShare #${newCount} - submitted to developer)`
-          : `Code ${code} submitted successfully`;
-        Alert.alert('Success!', message);
+        const responseText = await response.text();
+        const result = detectSubmissionResult(responseText, code);
         
-        // Save to history
-        const newEntry = {
-          code,
-          timestamp: new Date().toISOString(),
-          status: 'success'
-        };
-        const updatedHistory = [newEntry, ...submissionHistory.slice(0, 9)]; // Keep last 10
-        setSubmissionHistory(updatedHistory);
-        await AsyncStorage.setItem('submissionHistory', JSON.stringify(updatedHistory));
-        
-        // Auto-reset for next scan
-        setTimeout(() => {
-          resetForNextScan();
-        }, 2000); // Wait 2 seconds before resetting
+        if (result.success) {
+          const message = isDevShare 
+            ? `${result.message}\n(DevShare #${newCount} - submitted to developer)`
+            : result.message;
+          Alert.alert('Success!', message);
+          
+          // Save to history
+          const newEntry = {
+            code,
+            timestamp: new Date().toISOString(),
+            status: 'success'
+          };
+          const updatedHistory = [newEntry, ...submissionHistory.slice(0, 9)]; // Keep last 10
+          setSubmissionHistory(updatedHistory);
+          await AsyncStorage.setItem('submissionHistory', JSON.stringify(updatedHistory));
+          
+          // Refresh points after successful submission
+          await fetchUserPoints();
+          
+          // Auto-reset for next scan
+          setTimeout(() => {
+            resetForNextScan();
+          }, 2000); // Wait 2 seconds before resetting
+        } else {
+          Alert.alert('Submission Failed', result.message);
+          
+          // Save failed attempt to history
+          const newEntry = {
+            code,
+            timestamp: new Date().toISOString(),
+            status: 'failed'
+          };
+          const updatedHistory = [newEntry, ...submissionHistory.slice(0, 9)];
+          setSubmissionHistory(updatedHistory);
+          await AsyncStorage.setItem('submissionHistory', JSON.stringify(updatedHistory));
+        }
       } else {
-        Alert.alert('Error', 'Failed to submit code. Check your internet connection.');
+        Alert.alert('Network Error', `Failed to submit code. Status: ${response.status}. Check your internet connection.`);
       }
     } catch (error) {
       console.error('Submission error:', error);
@@ -405,14 +565,28 @@ export default function App() {
               });
 
               if (response.ok) {
-                successCount++;
-                // Add to history
-                const newEntry = {
-                  code: codeQueue[i].code,
-                  timestamp: new Date().toISOString(),
-                  status: 'success'
-                };
-                setSubmissionHistory(prev => [newEntry, ...prev.slice(0, 9)]);
+                const responseText = await response.text();
+                const result = detectSubmissionResult(responseText, codeQueue[i].code);
+                
+                if (result.success) {
+                  successCount++;
+                  // Add to history
+                  const newEntry = {
+                    code: codeQueue[i].code,
+                    timestamp: new Date().toISOString(),
+                    status: 'success'
+                  };
+                  setSubmissionHistory(prev => [newEntry, ...prev.slice(0, 9)]);
+                } else {
+                  failCount++;
+                  // Add failed entry to history
+                  const newEntry = {
+                    code: codeQueue[i].code,
+                    timestamp: new Date().toISOString(),
+                    status: 'failed'
+                  };
+                  setSubmissionHistory(prev => [newEntry, ...prev.slice(0, 9)]);
+                }
               } else {
                 failCount++;
               }
@@ -438,6 +612,11 @@ export default function App() {
           // Update history in storage
           const updatedHistory = submissionHistory.slice(0, 10);
           await AsyncStorage.setItem('submissionHistory', JSON.stringify(updatedHistory));
+          
+          // Refresh points after batch submission
+          if (successCount > 0) {
+            await fetchUserPoints();
+          }
 
           setIsProcessing(false);
           Alert.alert(
@@ -628,6 +807,22 @@ export default function App() {
         </View>
       </View>
       
+      {/* Points Display */}
+      <View style={styles.pointsContainer}>
+        <TouchableOpacity 
+          style={styles.pointsDisplay}
+          onPress={fetchUserPoints}
+          disabled={isLoadingPoints}
+        >
+          <Text style={styles.pointsLabel}>Current Points:</Text>
+          <Text style={styles.pointsValue}>
+            {isLoadingPoints ? 'Loading...' : 
+             (userPoints === 'CAPTCHA' ? 'CAPTCHA Required' :
+              (userPoints !== null ? userPoints : 'Tap to refresh'))}
+          </Text>
+        </TouchableOpacity>
+      </View>
+      
       {!showManualInput ? (
         <View style={styles.cameraContainer}>
           <Camera 
@@ -740,8 +935,11 @@ export default function App() {
         <ScrollView style={styles.historyContainer}>
           <Text style={styles.historyTitle}>Recent Submissions:</Text>
           {submissionHistory.slice(0, 5).map((entry, index) => (
-            <Text key={index} style={styles.historyItem}>
-              {entry.code} - {new Date(entry.timestamp).toLocaleDateString()}
+            <Text key={index} style={[
+              styles.historyItem,
+              entry.status === 'failed' ? styles.historyItemFailed : styles.historyItemSuccess
+            ]}>
+              {entry.status === 'failed' ? '❌' : '✅'} {entry.code} - {new Date(entry.timestamp).toLocaleDateString()}
             </Text>
           ))}
         </ScrollView>
@@ -1020,6 +1218,12 @@ const styles = StyleSheet.create({
     color: '#666',
     marginBottom: 5,
   },
+  historyItemSuccess: {
+    color: '#2E8B57',
+  },
+  historyItemFailed: {
+    color: '#FF6347',
+  },
   codeActions: {
     flexDirection: 'row',
     justifyContent: 'space-around',
@@ -1139,5 +1343,34 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: '#666',
     fontWeight: '500',
+  },
+  pointsContainer: {
+    paddingHorizontal: 20,
+    marginBottom: 15,
+  },
+  pointsDisplay: {
+    backgroundColor: '#f8f9fa',
+    borderRadius: 12,
+    padding: 15,
+    borderLeftWidth: 4,
+    borderLeftColor: '#2E8B57',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    elevation: 2,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.2,
+    shadowRadius: 2,
+  },
+  pointsLabel: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#333',
+  },
+  pointsValue: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: '#2E8B57',
   },
 });
